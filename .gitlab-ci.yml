@@ -1,0 +1,151 @@
+stages:
+  - build
+
+.build-docker-image-prepare-script:
+  before_script: &build-docker-image-prepare-script
+    # Remove prefix v of tags and replace slashes with dashes
+    - export TAG=$(printf "${TAG}" | sed "s/^v//" | sed -e "s/\//-/g" | sed "s/^master$/latest/" | sed "s/^development$/canary/")
+    # Print following command including all used variables for debugging and due
+    # to collapse of multiline commands by gitlab
+    - set -x
+
+# Build docker image via non-privileged container build tool BuildKit
+.build-docker-image:
+  variables:
+    KUBERNETES_MEMORY_REQUEST: 1Gi
+    KUBERNETES_MEMORY_LIMIT: 4Gi
+    BUILDKIT_HOST: tcp://buildkitd:1234
+    DOCKER_CONFIG: ~/.docker
+    SKIP_CACHE_RENAME: 0
+    BUILD_ADDITIONAL_PARAMS: ''
+  # Start required build daemon
+  services:
+    - alias: buildkitd
+      name: moby/buildkit:v0.8.1-rootless
+      command:
+        - "--oci-worker-no-process-sandbox"
+        - "--addr"
+        - "tcp://0.0.0.0:1234"
+  cache:
+    # Sharing the cache key between jobs leads to race conditions, but as
+    # dockerfiles are rarely changing, this is not a problem, but saves more
+    # time for new branches
+    key: ${CI_PROJECT_PATH}-${DESTINATION}
+    paths:
+      - .buildkit.cache/
+  image:
+    name: moby/buildkit:v0.8.1-rootless
+    entrypoint: [ "sh", "-c" ]
+  before_script:
+    # Create credentials file for login to hub
+    - mkdir -p $DOCKER_CONFIG
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > $DOCKER_CONFIG/config.json
+    # Rename cache folder and use it only for import, to prevent a growing cache
+    # as buildkit's export cache merges the cache
+    - '[ "$SKIP_CACHE_RENAME" = 1 ] || [ ! -d .buildkit.cache ] || mv .buildkit.cache .buildkit-import.cache'
+    # If any dockerfile checksum is set, check for any changes to prevent an
+    # image push. `only: changes` does not work for new branches and detached
+    # MR pipelines.
+    # This shortens the execution time of a job, but is only possible for images
+    # without COPY statements for repo files!
+    # Exactly two whitespaces are required between checksum and path!
+    - |
+      [ -z $DOCKERFILE_SHA1_CHECKSUM ] \
+      || ! echo "$DOCKERFILE_SHA1_CHECKSUM  $CI_PROJECT_DIR/dockerfiles/$DOCKERFILE" | sha1sum -c - \
+      || { echo 'No change in Dockerfile, skipping build'; exit; }
+    - *build-docker-image-prepare-script
+  # Build and push image with specified target and tag
+  script:
+    - |
+      buildctl build \
+          --frontend=dockerfile.v0 \
+          --local context=$CI_PROJECT_DIR/$CONTEXT \
+          --local dockerfile=$CI_PROJECT_DIR/dockerfiles \
+          --opt filename=$DOCKERFILE \
+          --opt target=$TARGET \
+          --output type=image,name=$CI_REGISTRY_IMAGE/$DESTINATION:$TAG,push=true \
+          --import-cache type=local,src=.buildkit-import.cache/ \
+          --export-cache mode=max,type=local,dest=.buildkit.cache/ $BUILD_ADDITIONAL_PARAMS
+
+# Build docker image, but skip exporting the cache between provided
+# TARGET_CACHE and TARGET_NO_CACHE
+.build-docker-image-no-cache-export:
+  extends:
+    - .build-docker-image
+  variables:
+    # Skip building and updating intermediate cache layers
+    SKIP_CACHE_UPDATE: 0
+  # Build as in .build-docker-image the intermediate/cache targets, but
+  # without exporting/pushing an image, just for updating the cache.
+  # It will be skipped if a dockerfile checksum is set or $SKIP_CACHE_UPDATE.
+  script:
+    - '[ "$SKIP_CACHE_UPDATE" = 0 ] || exit;'
+    - |
+      buildctl build \
+          --frontend=dockerfile.v0 \
+          --local context=$CI_PROJECT_DIR/$CONTEXT \
+          --local dockerfile=$CI_PROJECT_DIR/dockerfiles \
+          --opt filename=$DOCKERFILE \
+          --opt target=$TARGET_CACHE1 \
+          --import-cache type=local,src=.buildkit-import.cache/1 \
+          --export-cache mode=max,type=local,dest=.buildkit.cache/1 $BUILD_ADDITIONAL_PARAMS
+    - |
+      buildctl build \
+          --frontend=dockerfile.v0 \
+          --local context=$CI_PROJECT_DIR/$CONTEXT \
+          --local dockerfile=$CI_PROJECT_DIR/dockerfiles \
+          --opt filename=$DOCKERFILE \
+          --opt target=$TARGET_CACHE2 \
+          --import-cache type=local,src=.buildkit-import.cache/2 \
+          --export-cache mode=max,type=local,dest=.buildkit.cache/2 $BUILD_ADDITIONAL_PARAMS
+  # Build the target with importing both caches and pushing it to registry
+  after_script:
+    # Ensure envs are set, if before_script exited
+    - *build-docker-image-prepare-script
+    # If caches weren't updated/rebuild, use old cache
+    - '[ -d .buildkit.cache ] || mv .buildkit-import.cache .buildkit.cache'
+    - |
+      buildctl build \
+          --frontend=dockerfile.v0 \
+          --local context=$CI_PROJECT_DIR/$CONTEXT \
+          --local dockerfile=$CI_PROJECT_DIR/dockerfiles \
+          --opt filename=$DOCKERFILE \
+          --opt target=$TARGET_NO_CACHE \
+          --output type=image,name=$CI_REGISTRY_IMAGE/$DESTINATION:$TAG,push=true \
+          --import-cache type=local,src=.buildkit.cache/1 \
+          --import-cache type=local,src=.buildkit.cache/2 $BUILD_ADDITIONAL_PARAMS
+
+
+#############################
+# BUILD STAGE
+#############################
+
+.build-preview:
+  stage: build
+  interruptible: true
+  variables:
+    # Currently disabled due to bug of buildkit, failing if not building layers,
+    # but using later from cache
+    SKIP_CACHE_UPDATE: 0
+
+.build-php:
+  extends:
+    - .build-docker-image-no-cache-export
+  variables:
+    DOCKERFILE: php/Dockerfile
+    TARGET_CACHE1: php-dependencies
+    TARGET_CACHE2: ${BUILD_PHP_TYPE}-base
+    TARGET_NO_CACHE: ${BUILD_PHP_TYPE}-production
+    DESTINATION: $BUILD_PHP_TYPE
+    TAG: $CI_COMMIT_REF_NAME
+
+.build-cron:
+  extends:
+    - .build-php
+  variables:
+    BUILD_PHP_TYPE: cron
+
+build-preview-cron:
+  extends:
+    - .build-cron
+    - .build-preview
