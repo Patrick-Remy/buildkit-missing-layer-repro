@@ -24,6 +24,6 @@ You can adjust the used buildkit image by setting the environment variable
 `BUILDKIT_IMAGE=your/buildkit:12345-rootless`.
 
 ## ⚠️ Caution when modifying the Dockerfile
-In my personal experience of reproducing, when trying to delete unused stages
-or layers, or simplify the Dockerfile the script no more fails.
-Sometimes also not `BUILD_PHP_TYPE=cron`, but instead `BUILD_PHP_TYPE=fpm` fails.
+In my personal experience of reproducing, when trying to remove any of the 
+statements in the Dockerfile, the script no more fails.
+

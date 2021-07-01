@@ -2,5 +2,5 @@
 
 set -e
 
+echo "Dummy script"
 
-exec "$@"

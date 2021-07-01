@@ -3,7 +3,8 @@
 set -e
 
 buildkit_image=${BUILDKIT_IMAGE:-moby/buildkit:v0.8.1-rootless}
-image_target=${BUILD_PHP_TYPE:-cron}
+dockerfile=${BUILD_DOCKERFILE:-Dockerfile}
+entrypoint=${ENTRYPOINT:-entrypoint.sh}
 
 # Build image
 build() {
@@ -18,27 +19,24 @@ build() {
           /usr/bin/buildctl-daemonless.sh build \
             --frontend dockerfile.v0 \
             --local context=/tmp/work \
-            --local dockerfile=/tmp/work/dockerfiles \
-            --opt filename=php/Dockerfile \
-            --opt target=php-dependencies \
+            --local dockerfile=/tmp/work \
+            --opt filename=${dockerfile} \
             --import-cache type=local,mode=max,src=/tmp/work/buildkit-import.cache/1 \
             --export-cache type=local,mode=max,dest=/tmp/work/buildkit.cache/1 \
         && \
-        /usr/bin/buildctl-daemonless.sh build \
-          --frontend dockerfile.v0 \
-          --local context=/tmp/work \
-          --local dockerfile=/tmp/work/dockerfiles \
-          --opt filename=php/Dockerfile \
-          --opt target=${image_target}-base \
-          --import-cache type=local,mode=max,src=/tmp/work/buildkit-import.cache/2 \
-          --export-cache type=local,mode=max,dest=/tmp/work/buildkit.cache/2 \
+          /usr/bin/buildctl-daemonless.sh build \
+            --frontend dockerfile.v0 \
+            --local context=/tmp/work \
+            --local dockerfile=/tmp/work \
+            --opt filename=${dockerfile} \
+            --import-cache type=local,mode=max,src=/tmp/work/buildkit-import.cache/2 \
+            --export-cache type=local,mode=max,dest=/tmp/work/buildkit.cache/2 \
         && \
           /usr/bin/buildctl-daemonless.sh build \
           --frontend dockerfile.v0 \
           --local context=/tmp/work \
-          --local dockerfile=/tmp/work/dockerfiles \
-          --opt filename=php/Dockerfile \
-          --opt target=${image_target}-production \
+          --local dockerfile=/tmp/work \
+          --opt filename=${dockerfile} \
           --import-cache type=local,mode=max,src=/tmp/work/buildkit.cache/1 \
           --import-cache type=local,mode=max,src=/tmp/work/buildkit.cache/2 \
           --output type=tar,dest=/tmp/work/image.tar
@@ -63,8 +61,8 @@ if [ "$1" != "skip-create-cache" ]; then
   [ -d image ] || mkdir image
   tar -xf image.tar -C image
 
-  [ -f image/docker-entrypoint.sh ] || { echo "image/docker-entrypoint.sh is missing!"; exit 1; }
-  echo "image/docker-entrypoint.sh exists – expected, cleanup"
+  [ -f image/${entrypoint} ] || { echo "image/${entrypoint} is missing!"; exit 1; }
+  echo "image/${entrypoint} exists – expected, cleanup"
 else
   echo "Skipping creating caches from scratch"
 fi
@@ -85,8 +83,8 @@ for retry in 1 2; do
   [ -d image ] || mkdir image
   tar -xf image.tar -C image;
 
-  [ -f image/docker-entrypoint.sh ] || { echo "image/docker-entrypoint.sh is missing!"; exit 1; }
-  echo "image/docker-entrypoint.sh exists – not expected, retry"
+  [ -f image/${entrypoint} ] || { echo "image/${entrypoint} is missing!"; exit 1; }
+  echo "image/${entrypoint} exists – not expected, retry"
 done
 
 echo "Reached max number of retries to reproduce issue, setup seems not to be affected"
